@@ -42,6 +42,12 @@ def export_report(
     total_folders = db.query(models.MonitoredFolder).count()
     generated_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
 
+    from services.audit_service import AuditService
+    AuditService.log_report_exported(
+        db, current_user.id, format,
+        {"total_incidents": len(incidents), "total_events": total_events, "total_folders": total_folders}
+    )
+
     if format == "json":
         data = {
             "report_generated_at": generated_at,

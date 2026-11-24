@@ -52,6 +52,9 @@ def create_event(
     db.commit()
     db.refresh(event)
 
+    from services.audit_service import AuditService
+    AuditService.log_file_event_received(db, current_user.id, event)
+
     return event
 
 

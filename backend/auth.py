@@ -11,6 +11,7 @@ from config import settings
 from database import get_db
 import models
 import schemas
+from services.audit_service import AuditService
 
 # Initialize password hasher with Argon2
 password_hash = PasswordHash((Argon2Hasher(),))
@@ -128,24 +129,18 @@ def require_admin(
     Role-Based Access Control (RBAC):
     Allows access only if current_user.role == 'admin'.
     If an operator or unauthorized user attempts access:
-    1. Records the unauthorized attempt in the audit_logs table.
+    1. Records the unauthorized attempt in the audit_logs table via AuditService.
     2. Raises HTTP 403 Forbidden with detail 'Insufficient permissions'.
     """
     if current_user.role != "admin":
-        audit_entry = models.AuditLog(
+        AuditService.log_unauthorized_attempt(
+            db=db,
             user_id=current_user.id,
-            action="ADMIN_ACCESS_DENIED",
-            resource_type="admin_endpoint",
-            resource_id=None,
-            status="failure",
-            details={
-                "username": current_user.username,
-                "role": current_user.role,
-                "reason": "Insufficient permissions: Administrator role required"
-            }
+            username=current_user.username,
+            role=current_user.role,
+            resource="admin_endpoint",
+            reason="Insufficient permissions: Administrator role required"
         )
-        db.add(audit_entry)
-        db.commit()
 
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
