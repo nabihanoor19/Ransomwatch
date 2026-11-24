@@ -14,9 +14,9 @@ router = APIRouter(
 )
 
 
-# -------------------------------------------------------------------
-# 1. MANAGE USERS (Admin Only)
-# -------------------------------------------------------------------
+# ------------------------------------------------------------------
+# GET /admin/users — List all users
+# ------------------------------------------------------------------
 @router.get(
     "/users",
     response_model=List[schemas.UserResponse],
@@ -26,62 +26,17 @@ def list_users(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
     return db.query(models.User).offset(skip).limit(limit).all()
 
 
-@router.post(
-    "/users",
-    response_model=schemas.UserResponse,
-    status_code=status.HTTP_201_CREATED,
-    summary="Create a user with designated role (Admin only)"
-)
-def create_user_by_admin(
-    user_data: schemas.UserCreate,
-    role: str = "operator",
-    db: Session = Depends(get_db),
-    admin: models.User = Depends(require_admin)
-):
-    if role not in ["admin", "operator"]:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid role. Must be 'admin' or 'operator'."
-        )
-
-    if db.query(models.User).filter(models.User.username == user_data.username).first():
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username already exists")
-    if db.query(models.User).filter(models.User.email == user_data.email).first():
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already exists")
-
-    new_user = models.User(
-        username=user_data.username,
-        email=user_data.email,
-        password_hash=hash_password(user_data.password),
-        role=role,
-        is_active=True
-    )
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
-
-    audit_entry = models.AuditLog(
-        user_id=admin.id,
-        action="ADMIN_CREATE_USER",
-        resource_type="users",
-        resource_id=str(new_user.id),
-        status="success",
-        details={"created_username": new_user.username, "assigned_role": new_user.role}
-    )
-    db.add(audit_entry)
-    db.commit()
-
-    return new_user
-
-
+# ------------------------------------------------------------------
+# PATCH /admin/users/{id} — Update a user's role or active status
+# ------------------------------------------------------------------
 @router.patch(
-    "/users/{user_id}/status",
+    "/users/{user_id}",
     response_model=schemas.UserResponse,
-    summary="Activate or deactivate a user account"
+    summary="Update a user's role or active status (Admin only)"
 )
-def update_user_status(
+def update_user(
     user_id: int,
-    is_active: bool,
+    update_in: schemas.UserUpdate,
     db: Session = Depends(get_db),
     admin: models.User = Depends(require_admin)
 ):
@@ -89,46 +44,40 @@ def update_user_status(
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-    # Prevent an admin from disabling their own account
-    if user.id == admin.id and not is_active:
+    # Prevent admin from locking themselves out
+    if user.id == admin.id and update_in.is_active is False:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Administrators cannot deactivate their own account."
         )
 
-    user.is_active = is_active
+    changes = {}
+    if update_in.is_active is not None:
+        user.is_active = update_in.is_active
+        changes["is_active"] = update_in.is_active
+    if update_in.role is not None:
+        user.role = update_in.role
+        changes["role"] = update_in.role
+
     db.commit()
     db.refresh(user)
 
-    audit_entry = models.AuditLog(
+    db.add(models.AuditLog(
         user_id=admin.id,
-        action="ADMIN_UPDATE_USER_STATUS",
+        action="ADMIN_UPDATE_USER",
         resource_type="users",
         resource_id=str(user.id),
         status="success",
-        details={"target_username": user.username, "new_active_status": is_active}
-    )
-    db.add(audit_entry)
+        details={"target_username": user.username, "changes": changes}
+    ))
     db.commit()
 
     return user
 
 
-# -------------------------------------------------------------------
-# 2. VIEW AUDIT LOGS (Admin Only)
-# -------------------------------------------------------------------
-@router.get(
-    "/audit-logs",
-    response_model=List[schemas.AuditLogResponse],
-    summary="View system audit logs"
-)
-def get_audit_logs(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    return db.query(models.AuditLog).order_by(models.AuditLog.timestamp.desc()).offset(skip).limit(limit).all()
-
-
-# -------------------------------------------------------------------
-# 3. CHANGE DETECTION THRESHOLDS & CONFIGURATIONS (Admin Only)
-# -------------------------------------------------------------------
+# ------------------------------------------------------------------
+# GET /admin/configurations — List all detection configurations
+# ------------------------------------------------------------------
 @router.get(
     "/configurations",
     response_model=List[schemas.ConfigurationResponse],
@@ -138,43 +87,69 @@ def get_configurations(db: Session = Depends(get_db)):
     return db.query(models.Configuration).all()
 
 
-@router.put(
+# ------------------------------------------------------------------
+# PATCH /admin/configurations/{id} — Update a specific rule by name
+# ------------------------------------------------------------------
+@router.patch(
     "/configurations/{rule_name}",
     response_model=schemas.ConfigurationResponse,
-    summary="Update or set detection threshold / system configuration"
+    summary="Update (or create) a detection threshold or system configuration rule"
 )
-def set_configuration(
+def update_configuration(
     rule_name: str,
-    config_in: schemas.ConfigurationCreate,
+    config_in: schemas.ConfigurationUpdate,
     db: Session = Depends(get_db),
     admin: models.User = Depends(require_admin)
 ):
-    config = db.query(models.Configuration).filter(models.Configuration.rule_name == rule_name).first()
+    config = db.query(models.Configuration).filter(
+        models.Configuration.rule_name == rule_name
+    ).first()
+
     if not config:
+        # Auto-create if it doesn't exist yet
         config = models.Configuration(
             rule_name=rule_name,
             value=config_in.value,
-            is_enabled=config_in.is_enabled,
+            is_enabled=config_in.is_enabled if config_in.is_enabled is not None else True,
             updated_by=admin.id
         )
         db.add(config)
     else:
-        config.value = config_in.value
-        config.is_enabled = config_in.is_enabled
+        if config_in.value is not None:
+            config.value = config_in.value
+        if config_in.is_enabled is not None:
+            config.is_enabled = config_in.is_enabled
         config.updated_by = admin.id
 
     db.commit()
     db.refresh(config)
 
-    audit_entry = models.AuditLog(
+    db.add(models.AuditLog(
         user_id=admin.id,
         action="ADMIN_UPDATE_CONFIG",
         resource_type="configurations",
         resource_id=rule_name,
         status="success",
-        details={"rule_name": rule_name, "value": config_in.value}
-    )
-    db.add(audit_entry)
+        details={"rule_name": rule_name, "new_value": config.value}
+    ))
     db.commit()
 
     return config
+
+
+# ------------------------------------------------------------------
+# GET /admin/audit-logs — View system audit trail
+# ------------------------------------------------------------------
+@router.get(
+    "/audit-logs",
+    response_model=List[schemas.AuditLogResponse],
+    summary="View full system audit trail (newest first)"
+)
+def get_audit_logs(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+    return (
+        db.query(models.AuditLog)
+        .order_by(models.AuditLog.timestamp.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )

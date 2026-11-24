@@ -1,6 +1,5 @@
-
 from pydantic import BaseModel, ConfigDict, Field, EmailStr
-from typing import Optional, Any, Literal
+from typing import Optional, Any, Literal, Dict
 from datetime import datetime
 
 
@@ -16,18 +15,20 @@ class ORMBaseSchema(BaseModel):
 # 1. USER SCHEMAS
 # ==========================================
 
-# Data accepted when creating a user
 class UserCreate(BaseModel):
     username: str = Field(min_length=3, max_length=50)
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
 
+class UserUpdate(BaseModel):
+    """Admin-permitted fields that can be changed on a user account."""
+    is_active: Optional[bool] = None
+    role: Optional[Literal["admin", "operator"]] = None
 
-# Data returned by the API
 class UserResponse(ORMBaseSchema):
     id: int
     username: str
-    email: EmailStr
+    email: str          # plain str so .local domains don't fail response validation
     role: str
     is_active: bool
     created_at: datetime
@@ -40,7 +41,6 @@ class UserResponse(ORMBaseSchema):
 class FolderCreate(BaseModel):
     folder_path: str = Field(min_length=1, max_length=500)
     folder_name: str = Field(min_length=1, max_length=255)
-
 
 class FolderResponse(ORMBaseSchema):
     id: int
@@ -55,21 +55,15 @@ class FolderResponse(ORMBaseSchema):
 # 3. FILE EVENT SCHEMAS
 # ==========================================
 
-# Data received from the trusted security engine
 class FileEventCreate(BaseModel):
     event_type: str = Field(min_length=1, max_length=50)
     file_name: str = Field(min_length=1, max_length=255)
     module: Optional[str] = None
-
     folder_id: int = Field(gt=0)
-
     severity: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
     risk_score: float = Field(ge=0, le=100)
-
     evidence: list[str] = Field(default_factory=list)
 
-
-# Data returned by the API
 class FileEventResponse(ORMBaseSchema):
     id: int
     event_id: str
@@ -94,6 +88,9 @@ class IncidentCreate(BaseModel):
     description: Optional[str] = None
     evidence: list[str] = Field(default_factory=list)
 
+class IncidentStatusUpdate(BaseModel):
+    """Allowed values: open, investigating, resolved"""
+    status: Literal["open", "investigating", "resolved"]
 
 class IncidentResponse(ORMBaseSchema):
     id: int
@@ -131,6 +128,9 @@ class ConfigurationCreate(BaseModel):
     value: Any
     is_enabled: bool = True
 
+class ConfigurationUpdate(BaseModel):
+    value: Optional[Any] = None
+    is_enabled: Optional[bool] = None
 
 class ConfigurationResponse(ORMBaseSchema):
     id: int
@@ -142,30 +142,57 @@ class ConfigurationResponse(ORMBaseSchema):
 
 
 # ==========================================
-# 7. STANDARD API RESPONSE SCHEMAS
+# 7. DASHBOARD SCHEMAS
+# ==========================================
+
+class DashboardStats(BaseModel):
+    total_monitored_folders: int
+    active_folders: int
+    total_events: int
+    total_incidents: int
+    open_incidents: int
+    investigating_incidents: int
+    resolved_incidents: int
+
+class RecentEvent(ORMBaseSchema):
+    id: int
+    event_id: str
+    event_type: str
+    file_name: str
+    severity: str
+    risk_score: float
+    timestamp: datetime
+
+class SeverityCount(BaseModel):
+    LOW: int
+    MEDIUM: int
+    HIGH: int
+    CRITICAL: int
+
+
+# ==========================================
+# 8. STANDARD API RESPONSE SCHEMAS
 # ==========================================
 
 class MessageResponse(BaseModel):
     message: str
 
-
 class ErrorResponse(BaseModel):
     error_code: str
     message: str
+
+
 # ==========================================
-# AUTHENTICATION SCHEMAS
+# 9. AUTHENTICATION SCHEMAS
 # ==========================================
 
-# 1. Login Request (when clients send JSON credentials)
 class UserLogin(BaseModel):
     email: EmailStr
     password: str = Field(min_length=1, max_length=128)
 
-# 2. Token Response (returned upon successful login)
 class Token(BaseModel):
     access_token: str
     token_type: str = "bearer"
 
-# 3. Token Data Payload (internal representation extracted from JWT)
 class TokenData(BaseModel):
     user_id: Optional[int] = None
