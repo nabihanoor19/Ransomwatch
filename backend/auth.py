@@ -121,16 +121,34 @@ def get_current_active_user(
     return current_user
 
 def require_admin(
-    current_user: models.User = Depends(get_current_active_user)
+    current_user: models.User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
 ) -> models.User:
     """
     Role-Based Access Control (RBAC):
     Allows access only if current_user.role == 'admin'.
-    Returns 403 Forbidden for operators.
+    If an operator or unauthorized user attempts access:
+    1. Records the unauthorized attempt in the audit_logs table.
+    2. Raises HTTP 403 Forbidden with detail 'Insufficient permissions'.
     """
     if current_user.role != "admin":
+        audit_entry = models.AuditLog(
+            user_id=current_user.id,
+            action="ADMIN_ACCESS_DENIED",
+            resource_type="admin_endpoint",
+            resource_id=None,
+            status="failure",
+            details={
+                "username": current_user.username,
+                "role": current_user.role,
+                "reason": "Insufficient permissions: Administrator role required"
+            }
+        )
+        db.add(audit_entry)
+        db.commit()
+
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access forbidden: Administrator privileges required"
+            detail="Insufficient permissions: Administrator privileges required"
         )
     return current_user

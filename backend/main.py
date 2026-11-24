@@ -7,7 +7,7 @@ sys.path.append(str(Path(__file__).resolve().parent))
 from fastapi import FastAPI
 from database import engine, Base
 import models
-from routers import auth_routes
+from routers import auth_routes, operator_routes, admin_routes
 
 # Create database tables if they don't already exist
 Base.metadata.create_all(bind=engine)
@@ -20,6 +20,8 @@ app = FastAPI(
 
 # Register routers
 app.include_router(auth_routes.router)
+app.include_router(operator_routes.router)
+app.include_router(admin_routes.router)
 
 @app.get("/")
 def home():
