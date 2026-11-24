@@ -168,3 +168,37 @@ def admin_only_check(current_user: models.User = Depends(require_admin)):
     return {
         "message": f"Welcome Administrator {current_user.username}. You have elevated access."
     }
+
+
+# -------------------------------------------------------------------
+# 5. LOGOUT ENDPOINT (Token Invalidation Strategy)
+# -------------------------------------------------------------------
+@router.post(
+    "/logout",
+    response_model=schemas.MessageResponse,
+    summary="Logout user and record session termination"
+)
+def logout(
+    current_user: models.User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Logout & Invalidation Strategy:
+    1. Client-Side Discard: The client removes the JWT token from storage.
+    2. Short Expiration: 30-minute token lifetime ensures quick natural invalidation.
+    3. Server-Side Audit: Logs logout event for security compliance and incident monitoring.
+    """
+    audit_entry = models.AuditLog(
+        user_id=current_user.id,
+        action="USER_LOGOUT",
+        resource_type="auth",
+        resource_id=str(current_user.id),
+        status="success",
+        details={"username": current_user.username}
+    )
+    db.add(audit_entry)
+    db.commit()
+
+    return {
+        "message": "Successfully logged out. Please discard your access token."
+    }

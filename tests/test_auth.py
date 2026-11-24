@@ -26,7 +26,7 @@ def clean_test_users():
                 (models.User.email.like("%@example.com")) |
                 (models.User.username.like("%test%")) |
                 (models.User.username.like("%user%")) |
-                (models.User.username.in_(["hacker_admin", "inactive_operator", "superadmin"]))
+                (models.User.username.in_(["hacker_admin", "inactive_operator", "superadmin", "logout_user"]))
             ).delete()
             db.commit()
         finally:
@@ -41,7 +41,6 @@ def clean_test_users():
 # SCENARIO 1: Correct credentials -> Login successful
 # ===================================================================
 def test_scenario_1_correct_credentials_login_successful():
-    # 1. Register user
     reg_res = client.post(
         "/auth/register",
         json={
@@ -52,7 +51,6 @@ def test_scenario_1_correct_credentials_login_successful():
     )
     assert reg_res.status_code == 201
 
-    # 2. Login with correct credentials
     login_res = client.post(
         "/auth/login",
         data={
@@ -71,7 +69,6 @@ def test_scenario_1_correct_credentials_login_successful():
 # SCENARIO 2: Wrong password -> 401 Unauthorized
 # ===================================================================
 def test_scenario_2_wrong_password_returns_401():
-    # 1. Register user
     client.post(
         "/auth/register",
         json={
@@ -81,7 +78,6 @@ def test_scenario_2_wrong_password_returns_401():
         }
     )
 
-    # 2. Login with wrong password
     login_res = client.post(
         "/auth/login",
         data={
@@ -97,7 +93,6 @@ def test_scenario_2_wrong_password_returns_401():
 # SCENARIO 3: Unknown email -> Generic authentication failure
 # ===================================================================
 def test_scenario_3_unknown_email_generic_failure():
-    # Attempt login with email that does NOT exist
     login_res = client.post(
         "/auth/login",
         data={
@@ -106,7 +101,6 @@ def test_scenario_3_unknown_email_generic_failure():
         }
     )
     assert login_res.status_code == 401
-    # Security: Generic message to prevent User Enumeration
     assert login_res.json()["detail"] == "Incorrect username/email or password"
 
 
@@ -114,7 +108,6 @@ def test_scenario_3_unknown_email_generic_failure():
 # SCENARIO 4: Expired token -> Access denied
 # ===================================================================
 def test_scenario_4_expired_token_access_denied():
-    # 1. Register user
     reg_res = client.post(
         "/auth/register",
         json={
@@ -125,13 +118,11 @@ def test_scenario_4_expired_token_access_denied():
     )
     user_id = reg_res.json()["id"]
 
-    # 2. Forge a token that expired 10 minutes ago
     expired_token = create_access_token(
         data={"sub": str(user_id)},
         expires_delta=timedelta(minutes=-10)
     )
 
-    # 3. Access protected route with expired token
     res = client.get(
         "/auth/me",
         headers={"Authorization": f"Bearer {expired_token}"}
@@ -144,7 +135,6 @@ def test_scenario_4_expired_token_access_denied():
 # SCENARIO 5: Missing token -> Access denied
 # ===================================================================
 def test_scenario_5_missing_token_access_denied():
-    # Access protected route with NO Authorization header
     res = client.get("/auth/me")
     assert res.status_code == 401
     assert res.json()["detail"] == "Not authenticated"
@@ -154,14 +144,13 @@ def test_scenario_5_missing_token_access_denied():
 # SCENARIO 6: Inactive user -> Access denied
 # ===================================================================
 def test_scenario_6_inactive_user_access_denied():
-    # 1. Directly create an inactive user in DB
     db = SessionLocal()
     inactive_user = models.User(
         username="inactive_operator",
         email="inactive@example.com",
         password_hash=hash_password("Password123!"),
         role="operator",
-        is_active=False  # DEACTIVATED
+        is_active=False
     )
     db.add(inactive_user)
     db.commit()
@@ -169,7 +158,6 @@ def test_scenario_6_inactive_user_access_denied():
     user_id = inactive_user.id
     db.close()
 
-    # Case A: Inactive user attempts to login -> 400 Bad Request
     login_res = client.post(
         "/auth/login",
         data={
@@ -180,7 +168,6 @@ def test_scenario_6_inactive_user_access_denied():
     assert login_res.status_code == 400
     assert "Account is inactive" in login_res.json()["detail"]
 
-    # Case B: Inactive user attempts to use a token -> 400 Bad Request
     token = create_access_token(data={"sub": str(user_id)})
     me_res = client.get(
         "/auth/me",
@@ -191,31 +178,27 @@ def test_scenario_6_inactive_user_access_denied():
 
 
 # ===================================================================
-# SCENARIO 7: Public attempt to create admin -> Rejected / Forced Operator
+# SCENARIO 7: Public attempt to create admin -> Rejected
 # ===================================================================
 def test_scenario_7_public_attempt_to_create_admin_rejected():
-    # Attacker tries mass-assignment privilege escalation by passing "role": "admin"
     res = client.post(
         "/auth/register",
         json={
             "username": "hacker_admin",
             "email": "hacker@example.com",
             "password": "Password123!",
-            "role": "admin"  # Malicious injection
+            "role": "admin"
         }
     )
     assert res.status_code == 201
     data = res.json()
-    # Ensure role remained 'operator'
     assert data["role"] == "operator"
 
-    # Verify directly in SQLite database
     db = SessionLocal()
     db_user = db.query(models.User).filter(models.User.username == "hacker_admin").first()
     assert db_user.role == "operator"
     db.close()
 
-    # Login and try to access admin-only endpoint -> 403 Forbidden
     login_res = client.post(
         "/auth/login",
         data={"username": "hacker@example.com", "password": "Password123!"}
@@ -227,3 +210,38 @@ def test_scenario_7_public_attempt_to_create_admin_rejected():
     )
     assert admin_check.status_code == 403
     assert "Administrator privileges required" in admin_check.json()["detail"]
+
+
+# ===================================================================
+# SCENARIO 8: Logout & Invalidation strategy
+# ===================================================================
+def test_scenario_8_logout_and_session_invalidation():
+    # 1. Register & login
+    client.post(
+        "/auth/register",
+        json={
+            "username": "logout_user",
+            "email": "logout@example.com",
+            "password": "Password123!"
+        }
+    )
+    login_res = client.post(
+        "/auth/login",
+        data={"username": "logout@example.com", "password": "Password123!"}
+    )
+    token = login_res.json()["access_token"]
+
+    # 2. Call logout endpoint
+    logout_res = client.post(
+        "/auth/logout",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert logout_res.status_code == 200
+    assert "Successfully logged out" in logout_res.json()["message"]
+
+    # 3. Verify audit log recorded USER_LOGOUT
+    db = SessionLocal()
+    audit_entry = db.query(models.AuditLog).filter(models.AuditLog.action == "USER_LOGOUT").first()
+    assert audit_entry is not None
+    assert audit_entry.status == "success"
+    db.close()
