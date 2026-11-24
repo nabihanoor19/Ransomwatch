@@ -152,3 +152,20 @@ class MessageResponse(BaseModel):
 class ErrorResponse(BaseModel):
     error_code: str
     message: str
+# ==========================================
+# AUTHENTICATION SCHEMAS
+# ==========================================
+
+# 1. Login Request (when clients send JSON credentials)
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=1, max_length=128)
+
+# 2. Token Response (returned upon successful login)
+class Token(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+# 3. Token Data Payload (internal representation extracted from JWT)
+class TokenData(BaseModel):
+    user_id: Optional[int] = None
