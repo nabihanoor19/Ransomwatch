@@ -1,7 +1,9 @@
 import uuid
-from fastapi import APIRouter, Depends, HTTPException, status
+from datetime import datetime
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
 
 from database import get_db
 import models
@@ -58,22 +60,53 @@ def create_incident(
 
 
 # ------------------------------------------------------------------
-# GET /incidents — List all incidents
+# GET /incidents — List all incidents (with Task 9 filters)
 # ------------------------------------------------------------------
 @router.get(
     "",
     response_model=List[schemas.IncidentResponse],
-    summary="List all recorded incidents (newest first)"
+    summary="List recorded incidents with optional severity, status, module, and date range filters"
 )
 def list_incidents(
     skip: int = 0,
     limit: int = 50,
+    severity: Optional[str] = Query(None, description="Filter by severity: LOW, MEDIUM, HIGH, CRITICAL"),
+    incident_status: Optional[str] = Query(None, alias="status", description="Filter by status: open, investigating, resolved"),
+    module: Optional[str] = Query(None, description="Filter by detection module: entropy, canary, rules, anomaly, monitor"),
+    start_date: Optional[datetime] = Query(None, description="Filter incidents created at or after this ISO timestamp"),
+    end_date: Optional[datetime] = Query(None, description="Filter incidents created at or before this ISO timestamp"),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_active_user)
 ):
+    query = db.query(models.Incident)
+
+    if severity:
+        query = query.filter(models.Incident.severity == severity.upper())
+    if incident_status:
+        query = query.filter(models.Incident.status == incident_status.lower())
+    if start_date:
+        query = query.filter(models.Incident.created_at >= start_date.replace(tzinfo=None))
+    if end_date:
+        query = query.filter(models.Incident.created_at <= end_date.replace(tzinfo=None))
+    if module:
+        mod_lower = module.lower()
+        linked_ids = (
+            db.query(models.FileEvent.incident_id)
+            .filter(
+                models.FileEvent.incident_id.isnot(None),
+                models.FileEvent.module == mod_lower,
+            )
+            .distinct()
+        )
+        query = query.filter(
+            or_(
+                models.Incident.id.in_(linked_ids),
+                models.Incident.description.ilike(f"%{mod_lower}%"),
+            )
+        )
+
     return (
-        db.query(models.Incident)
-        .order_by(models.Incident.created_at.desc())
+        query.order_by(models.Incident.created_at.desc())
         .offset(skip)
         .limit(limit)
         .all()

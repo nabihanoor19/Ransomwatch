@@ -1,29 +1,67 @@
 import csv
 import io
-import json
-from datetime import datetime
+import re
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse, JSONResponse
 from sqlalchemy.orm import Session
-from typing import Literal
+from typing import Any, Dict, List, Literal
 
 from database import get_db
 import models
-import schemas
 from auth import get_current_active_user
+from security.rules import recommended_action_for_severity
 
 router = APIRouter(
     prefix="/reports",
     tags=["Reports & Export"]
 )
 
+_SECRET_PATTERN = re.compile(
+    r"(bearer\s+[A-Za-z0-9\-_\.]+|password\s*[:=]\s*\S+|secret\s*[:=]\s*\S+|token\s*[:=]\s*\S+)",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_text(value: Any) -> str:
+    """Redact accidental secret/token strings and normalize None."""
+    if value is None:
+        return ""
+    text = str(value)
+    return _SECRET_PATTERN.sub("[REDACTED]", text)
+
+
+def _sanitize_csv_cell(value: Any) -> str:
+    """Sanitize text and guard against CSV/Excel formula injection."""
+    cleaned = _sanitize_text(value)
+    if cleaned and cleaned[0] in ("=", "+", "-", "@"):
+        return f"'{cleaned}"
+    return cleaned
+
+
+def _build_sanitized_incident_row(inc: models.Incident) -> Dict[str, Any]:
+    """Build a sanitized report entry containing all Task 9.4 required fields."""
+    evidence_list: List[str] = [
+        _sanitize_text(item) for item in (inc.evidence or [])
+    ]
+    return {
+        "incident_id": inc.incident_id,
+        "timestamp": inc.created_at.isoformat() if inc.created_at else "",
+        "severity": inc.severity,
+        "risk_score": inc.risk_score,
+        "detection_reason": _sanitize_text(inc.description or "Suspicious activity detected"),
+        "supporting_evidence": evidence_list,
+        "recommended_action": recommended_action_for_severity(inc.severity),
+        "status": inc.status,
+    }
+
 
 # ------------------------------------------------------------------
-# GET /reports/export — Export incidents + events as CSV or JSON
+# GET /reports/export — Export sanitized incidents report (CSV/JSON)
 # ------------------------------------------------------------------
 @router.get(
     "/export",
-    summary="Export security report as CSV or JSON"
+    summary="Export sanitized security report as CSV or JSON"
 )
 def export_report(
     format: Literal["csv", "json"] = Query("json", description="Output format: csv or json"),
@@ -31,16 +69,15 @@ def export_report(
     current_user: models.User = Depends(get_current_active_user)
 ):
     """
-    Exports a sanitized security report containing:
-    - All incidents (id, severity, risk_score, status, description, created_at)
-    - Total event and folder counts
-
-    Returns either a downloadable CSV file or a JSON response.
+    Exports a sanitized security report containing for every incident:
+    - Incident ID, Timestamp, Severity, Risk Score
+    - Detection Reason, Supporting Evidence, Recommended Action, Status
     """
     incidents = db.query(models.Incident).order_by(models.Incident.created_at.desc()).all()
     total_events = db.query(models.FileEvent).count()
     total_folders = db.query(models.MonitoredFolder).count()
-    generated_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    now_utc = datetime.now(timezone.utc)
+    generated_at = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
 
     from services.audit_service import AuditService
     AuditService.log_report_exported(
@@ -48,26 +85,18 @@ def export_report(
         {"total_incidents": len(incidents), "total_events": total_events, "total_folders": total_folders}
     )
 
+    sanitized_incidents = [_build_sanitized_incident_row(inc) for inc in incidents]
+
     if format == "json":
         data = {
             "report_generated_at": generated_at,
             "generated_by": current_user.username,
             "summary": {
-                "total_incidents": len(incidents),
+                "total_incidents": len(sanitized_incidents),
                 "total_events": total_events,
                 "total_monitored_folders": total_folders
             },
-            "incidents": [
-                {
-                    "incident_id": inc.incident_id,
-                    "severity": inc.severity,
-                    "risk_score": inc.risk_score,
-                    "status": inc.status,
-                    "description": inc.description,
-                    "created_at": str(inc.created_at)
-                }
-                for inc in incidents
-            ]
+            "incidents": sanitized_incidents,
         }
         return JSONResponse(content=data)
 
@@ -75,29 +104,38 @@ def export_report(
     output = io.StringIO()
     writer = csv.writer(output)
 
-    # Header block
     writer.writerow(["RansomWatch Security Report"])
     writer.writerow(["Generated At", generated_at])
-    writer.writerow(["Generated By", current_user.username])
-    writer.writerow(["Total Incidents", len(incidents)])
+    writer.writerow(["Generated By", _sanitize_csv_cell(current_user.username)])
+    writer.writerow(["Total Incidents", len(sanitized_incidents)])
     writer.writerow(["Total Events", total_events])
     writer.writerow(["Total Monitored Folders", total_folders])
-    writer.writerow([])  # blank line separator
+    writer.writerow([])
 
-    # Incident table
-    writer.writerow(["incident_id", "severity", "risk_score", "status", "description", "created_at"])
-    for inc in incidents:
+    writer.writerow([
+        "incident_id",
+        "timestamp",
+        "severity",
+        "risk_score",
+        "detection_reason",
+        "supporting_evidence",
+        "recommended_action",
+        "status",
+    ])
+    for row in sanitized_incidents:
         writer.writerow([
-            inc.incident_id,
-            inc.severity,
-            inc.risk_score,
-            inc.status,
-            inc.description or "",
-            str(inc.created_at)
+            _sanitize_csv_cell(row["incident_id"]),
+            _sanitize_csv_cell(row["timestamp"]),
+            _sanitize_csv_cell(row["severity"]),
+            row["risk_score"],
+            _sanitize_csv_cell(row["detection_reason"]),
+            _sanitize_csv_cell(" | ".join(row["supporting_evidence"])),
+            _sanitize_csv_cell(row["recommended_action"]),
+            _sanitize_csv_cell(row["status"]),
         ])
 
     output.seek(0)
-    filename = f"ransomwatch_report_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+    filename = f"ransomwatch_report_{now_utc.strftime('%Y%m%d_%H%M%S')}.csv"
     return StreamingResponse(
         iter([output.getvalue()]),
         media_type="text/csv",

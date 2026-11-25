@@ -147,9 +147,13 @@ class ConfigurationResponse(ORMBaseSchema):
 
 class DashboardStats(BaseModel):
     total_monitored_folders: int
+    monitored_folders: int
     active_folders: int
+    monitoring_status: str
     total_events: int
+    suspicious_events: int
     total_incidents: int
+    critical_incidents: int
     open_incidents: int
     investigating_incidents: int
     resolved_incidents: int

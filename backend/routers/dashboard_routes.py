@@ -25,13 +25,28 @@ def get_dashboard_stats(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_active_user)
 ):
+    total_folders = db.query(models.MonitoredFolder).count()
+    active_folders = db.query(models.MonitoredFolder).filter(
+        models.MonitoredFolder.status == "active"
+    ).count()
+    total_events = db.query(models.FileEvent).count()
+    suspicious_events = db.query(models.FileEvent).filter(
+        models.FileEvent.severity.in_(["MEDIUM", "HIGH", "CRITICAL"])
+    ).count()
+    total_incidents = db.query(models.Incident).count()
+    critical_incidents = db.query(models.Incident).filter(
+        models.Incident.severity == "CRITICAL"
+    ).count()
+
     return schemas.DashboardStats(
-        total_monitored_folders=db.query(models.MonitoredFolder).count(),
-        active_folders=db.query(models.MonitoredFolder).filter(
-            models.MonitoredFolder.status == "active"
-        ).count(),
-        total_events=db.query(models.FileEvent).count(),
-        total_incidents=db.query(models.Incident).count(),
+        total_monitored_folders=total_folders,
+        monitored_folders=total_folders,
+        active_folders=active_folders,
+        monitoring_status="active" if active_folders > 0 else "stopped",
+        total_events=total_events,
+        suspicious_events=suspicious_events,
+        total_incidents=total_incidents,
+        critical_incidents=critical_incidents,
         open_incidents=db.query(models.Incident).filter(
             models.Incident.status == "open"
         ).count(),
