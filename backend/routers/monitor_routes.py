@@ -1,11 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from typing import List
+from typing import Any, Dict, List
 
-from database import get_db
+from database import SessionLocal, get_db
 import models
 import schemas
 from auth import get_current_active_user, require_admin
+from security.pipeline import monitor_manager
 
 router = APIRouter(
     prefix="/monitor",
@@ -102,6 +103,13 @@ def start_monitoring(
     db.commit()
     db.refresh(folder)
 
+    monitor_manager.start_monitoring(
+        folder_id=folder.id,
+        folder_path=folder.folder_path,
+        db_factory=SessionLocal,
+        user_id=current_user.id,
+    )
+
     db.add(models.AuditLog(
         user_id=current_user.id,
         action="MONITORING_STARTED",
@@ -136,6 +144,8 @@ def stop_monitoring(
     if folder.status == "stopped":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Folder monitoring is already stopped")
 
+    monitor_manager.stop_monitoring(folder.id)
+
     folder.status = "stopped"
     db.commit()
     db.refresh(folder)
@@ -151,3 +161,57 @@ def stop_monitoring(
     db.commit()
 
     return folder
+
+
+# ------------------------------------------------------------------
+# GET /monitor/status/{folder_id} — Inspect live watcher & canary status
+# ------------------------------------------------------------------
+@router.get(
+    "/status/{folder_id}",
+    summary="Get live watchdog observer and canary status for a monitored folder"
+)
+def get_monitoring_status(
+    folder_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_active_user)
+) -> Dict[str, Any]:
+    folder = db.query(models.MonitoredFolder).filter(
+        models.MonitoredFolder.id == folder_id
+    ).first()
+    if not folder:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Folder not found")
+
+    live_status = monitor_manager.get_status(folder.id)
+    live_status["db_status"] = folder.status
+    live_status["folder_name"] = folder.folder_name
+    return live_status
+
+
+# ------------------------------------------------------------------
+# POST /monitor/scan/{folder_id} — Verify canary integrity on demand
+# ------------------------------------------------------------------
+@router.post(
+    "/scan/{folder_id}",
+    summary="Verify canary file integrity on demand for a monitored folder"
+)
+def scan_folder_canaries(
+    folder_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_active_user)
+) -> Dict[str, Any]:
+    folder = db.query(models.MonitoredFolder).filter(
+        models.MonitoredFolder.id == folder_id
+    ).first()
+    if not folder:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Folder not found")
+
+    alerts = monitor_manager.verify_canaries(
+        folder_id=folder.id,
+        db=db,
+        user_id=current_user.id,
+    )
+    return {
+        "folder_id": folder.id,
+        "alerts_triggered": len(alerts),
+        "alerts": alerts,
+    }
