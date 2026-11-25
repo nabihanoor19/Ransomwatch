@@ -53,7 +53,14 @@ def create_event(
     db.refresh(event)
 
     from services.audit_service import AuditService
+    from services.incident_service import IncidentService
+
     AuditService.log_file_event_received(db, current_user.id, event)
+    IncidentService.correlate_or_create_incident(
+        db=db,
+        event=event,
+        user_id=current_user.id,
+    )
 
     return event
 
